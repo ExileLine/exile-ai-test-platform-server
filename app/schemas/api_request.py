@@ -121,7 +121,7 @@ class ApiRequestDeleteReqData(BaseModel):
 class ApiRequestPageReqData(CommonPage):
     is_deleted: int = 0
     creator_id: Optional[int] = None
-    case_status: Optional[Literal["已完成", "开发中", "调试中", "弃用"]] = None
+    case_status: Optional[Literal["已完成", "开发中", "调试中", "弃用", "", None]] = None
     name: Optional[str] = None
     url: Optional[str] = None
     is_public_visible: Optional[bool] = None
