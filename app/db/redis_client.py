@@ -52,7 +52,12 @@ async def close_redis_connection_pool():
     """在应用关闭时关闭连接池"""
     global redis_pool
     if redis_pool:
-        await redis_pool.close()
+        # redis-py 5.x 推荐使用 aclose()
+        close_method = getattr(redis_pool, "aclose", None)
+        if close_method:
+            await close_method()
+        else:
+            await redis_pool.close()
         redis_pool = None
         logger.info("Redis 连接池已关闭")
 

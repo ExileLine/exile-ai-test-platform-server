@@ -28,6 +28,11 @@ class ApiRequest(CustomBaseModel):
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="测试用例名称")
     method: Mapped[str] = mapped_column(String(16), nullable=False, default="GET", comment="HTTP方法")
     url: Mapped[str] = mapped_column(String(2048), nullable=False, comment="请求URL")
+    creator: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="创建人")
+    creator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="创建人ID")
+    modifier: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="更新人")
+    modifier_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="更新人ID")
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="备注")
 
     # 基础参数模板（执行时会与数据集参数合并）
     base_query_params: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, comment="基础Query参数")
@@ -52,8 +57,8 @@ class ApiRequest(CustomBaseModel):
     case_status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
-        default="developing",
-        comment="用例状态:completed/developing/debugging/deprecated",
+        default="开发中",
+        comment="用例状态:已完成/开发中/调试中/弃用",
     )
     is_copied_case: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否复制生成")
     is_public_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否公共可见")
@@ -75,6 +80,11 @@ class ApiRequestDataset(CustomBaseModel):
 
     request_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="测试用例ID")
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="数据集名称")
+    creator: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="创建人")
+    creator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="创建人ID")
+    modifier: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="更新人")
+    modifier_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="更新人ID")
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="备注")
     variables: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,

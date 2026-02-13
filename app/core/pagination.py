@@ -101,7 +101,7 @@ class CommonPaginateQuery:
         return None
 
     async def build_filter_conditions(self):
-        for k, v in self.request_data.dict().items():
+        for k, v in self.request_data.model_dump().items():
             if v is None or (bool(v) is False and k not in self.skip_list):
                 continue
             if k in self.like_list:

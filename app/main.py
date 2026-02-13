@@ -34,9 +34,9 @@ def create_app():
 
     print(kw)
     app = FastAPI(
-        title="FastApi_BestPractices",
+        title="exile-ai-test-platform",
         description="description",
-        summary="I hope everything has best practices.",
+        summary="I hope every day is fulfilling, and everything follows best practices.",
         version="1.0.0",
         openapi_url="/api/v1/openapi.json",
         lifespan=lifespan,
