@@ -392,3 +392,42 @@ def test_test_scenario_case_page_success(monkeypatch: pytest.MonkeyPatch, client
     assert body["code"] == 200
     assert body["data"]["total"] == 1
     assert body["data"]["records"][0]["step_no"] == 1
+
+
+def test_run_scenario_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    scenario_obj = _build_scenario(id=20)
+
+    async def _fake_get_scenario(db, scenario_id: int):
+        assert scenario_id == 20
+        return scenario_obj
+
+    async def _fake_run_test_scenario(*, db, scenario_obj, env_id, trigger_type, initial_variables):
+        assert scenario_obj.id == 20
+        assert env_id == 1
+        assert trigger_type == "manual"
+        assert initial_variables == {"uid": "u1"}
+        return {
+            "scenario_run_id": 999,
+            "scenario_id": 20,
+            "is_success": True,
+            "total_request_runs": 2,
+            "success_request_runs": 2,
+            "failed_request_runs": 0,
+            "error_message": None,
+            "runtime_variables": {"uid": "u1", "token": "abc"},
+        }
+
+    monkeypatch.setattr(scenario_router, "_get_scenario_or_404", _fake_get_scenario)
+    monkeypatch.setattr(scenario_router, "run_test_scenario", _fake_run_test_scenario)
+
+    resp = client.post(
+        "/api/scenario/run",
+        json={"scenario_id": 20, "env_id": 1, "trigger_type": "manual", "initial_variables": {"uid": "u1"}},
+    )
+    body = resp.json()
+
+    assert resp.status_code == 201
+    assert body["code"] == 201
+    assert body["data"]["scenario_run_id"] == 999
+    assert body["data"]["is_success"] is True
+    assert body["data"]["runtime_variables"]["token"] == "abc"

@@ -15,6 +15,7 @@ from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
 from app.models.api_request import ApiRequest, ApiRequestDataset, TestScenario, TestScenarioCase
+from app.services.scenario_runner import run_test_scenario
 from app.schemas.scenario import (
     TestScenarioCaseCreateReqData,
     TestScenarioCaseDeleteReqData,
@@ -25,6 +26,7 @@ from app.schemas.scenario import (
     TestScenarioCreateReqData,
     TestScenarioDeleteReqData,
     TestScenarioPageReqData,
+    TestScenarioRunReqData,
     TestScenarioUpdateReqData,
 )
 
@@ -341,3 +343,21 @@ async def set_test_scenario_case_dataset_strategy(
     obj.touch()
     await db.commit()
     return api_response(http_code=status.HTTP_201_CREATED, code=201)
+
+
+@router.post("/run", summary="执行测试场景")
+async def run_scenario(
+    request_data: TestScenarioRunReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    scenario_obj = await _get_scenario_or_404(db, request_data.scenario_id)
+    result = await run_test_scenario(
+        db=db,
+        scenario_obj=scenario_obj,
+        env_id=request_data.env_id,
+        trigger_type=request_data.trigger_type,
+        initial_variables=request_data.initial_variables,
+    )
+    await db.commit()
+    return api_response(http_code=status.HTTP_201_CREATED, code=201, data=result)

@@ -116,3 +116,12 @@ class TestScenarioCaseSetDatasetStrategyReqData(BaseModel):
         if self.dataset_run_mode == "single" and self.dataset_id is None:
             raise ValueError("dataset_run_mode=single 时 dataset_id 必传")
         return self
+
+
+class TestScenarioRunReqData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    scenario_id: int = Field(description="场景ID")
+    env_id: Optional[int] = Field(default=None, description="覆盖环境ID")
+    trigger_type: Literal["manual", "schedule"] = Field(default="manual", description="触发类型")
+    initial_variables: dict = Field(default_factory=dict, description="初始变量上下文")

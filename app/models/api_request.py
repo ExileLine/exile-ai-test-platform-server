@@ -3,6 +3,8 @@
 # @Author  : yangyuexiong
 # @File    : api_request.py
 
+from typing import Any
+
 from sqlalchemy import JSON, BigInteger, Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -146,6 +148,7 @@ class ApiRequestRun(CustomBaseModel):
     __tablename__ = "exile_api_request_runs"
 
     request_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="测试用例ID")
+    scenario_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="场景运行ID")
     scenario_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="场景ID(场景执行时记录)")
     scenario_case_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="场景步骤ID")
     dataset_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="数据集ID")
@@ -159,3 +162,59 @@ class ApiRequestRun(CustomBaseModel):
 
     is_success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="执行是否成功")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="执行错误信息")
+
+
+class ApiExtractRule(CustomBaseModel):
+    """变量提取规则(定义如何从响应中提取变量)"""
+
+    __tablename__ = "exile_api_extract_rules"
+
+    request_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="测试用例ID")
+    dataset_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="数据集ID(为空表示通用)")
+    var_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="变量名")
+    source_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="提取来源:response_header/response_json/response_cookie/response_text_regex/response_status/session",
+    )
+    source_expr: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="提取表达式")
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否必需")
+    default_value: Mapped[Any | None] = mapped_column(JSON, nullable=True, comment="提取失败时默认值")
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="scenario", comment="变量作用域:step/scenario/global")
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否敏感变量")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, comment="是否启用")
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序值")
+
+
+class TestScenarioRun(CustomBaseModel):
+    """场景执行记录"""
+
+    __tablename__ = "exile_test_scenario_runs"
+
+    scenario_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="场景ID")
+    trigger_type: Mapped[str] = mapped_column(String(16), nullable=False, default="manual", comment="触发类型:manual/schedule")
+    total_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行总次数")
+    success_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行成功次数")
+    failed_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行失败次数")
+    is_success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="场景执行是否成功")
+    runtime_variables: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, comment="执行结束时变量上下文快照")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="场景执行错误信息")
+
+
+class ApiRunVariable(CustomBaseModel):
+    """执行过程变量记录"""
+
+    __tablename__ = "exile_api_run_variables"
+
+    scenario_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="场景运行ID")
+    request_run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="请求运行ID")
+    scenario_case_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="场景步骤ID")
+    request_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="测试用例ID")
+    dataset_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="数据集ID")
+    var_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="变量名")
+    var_value: Mapped[Any | None] = mapped_column(JSON, nullable=True, comment="变量值")
+    value_type: Mapped[str] = mapped_column(String(32), nullable=False, default="str", comment="变量值类型")
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="提取来源")
+    source_expr: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="提取表达式")
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="scenario", comment="变量作用域")
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否敏感变量")

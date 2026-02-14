@@ -281,6 +281,7 @@ dependencies = [
     { name = "bcrypt" },
     { name = "email-validator" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic-settings" },
     { name = "python-dateutil" },
@@ -294,7 +295,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "alembic" },
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -306,6 +306,7 @@ requires-dist = [
     { name = "bcrypt", specifier = ">=4.2.0" },
     { name = "email-validator", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "httpx", specifier = ">=0.27.2" },
     { name = "loguru", specifier = ">=0.7.2" },
     { name = "pydantic-settings", specifier = ">=2.5.2" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
@@ -319,7 +320,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "alembic", specifier = ">=1.14.1" },
-    { name = "httpx", specifier = ">=0.27.2" },
     { name = "pytest", specifier = ">=8.3.2" },
 ]
 

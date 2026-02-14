@@ -3,7 +3,7 @@
 # @Author  : yangyuexiong
 # @File    : api_request.py
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,6 +11,15 @@ from app.schemas.pagination import CommonPage
 
 HTTP_METHOD_VALUES = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 BODY_TYPE_VALUES = {"none", "json", "form-urlencoded", "form-data", "raw", "binary"}
+EXTRACT_SOURCE_VALUES = {
+    "response_header",
+    "response_json",
+    "response_cookie",
+    "response_text_regex",
+    "response_status",
+    "session",
+}
+EXTRACT_SCOPE_VALUES = {"step", "scenario", "global"}
 
 
 class ApiRequestCreateReqData(BaseModel):
@@ -205,3 +214,80 @@ class ApiRequestDatasetPageReqData(CommonPage):
     is_deleted: int = 0
     is_enabled: Optional[bool] = None
     name: Optional[str] = None
+
+
+class ApiRequestRunReqData(BaseModel):
+    request_id: int = Field(description="测试用例ID")
+    dataset_id: Optional[int] = Field(default=None, description="指定数据集ID")
+    env_id: Optional[int] = Field(default=None, description="覆盖环境ID")
+
+
+class ApiExtractRuleCreateReqData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    request_id: int = Field(description="测试用例ID")
+    dataset_id: Optional[int] = Field(default=None, description="数据集ID(为空表示通用)")
+    var_name: str = Field(description="变量名", min_length=1, max_length=64)
+    source_type: Literal[
+        "response_header",
+        "response_json",
+        "response_cookie",
+        "response_text_regex",
+        "response_status",
+        "session",
+    ] = Field(description="提取来源")
+    source_expr: Optional[str] = Field(default=None, description="提取表达式")
+    required: bool = Field(default=False, description="是否必需")
+    default_value: Optional[Any] = Field(default=None, description="提取失败时默认值")
+    scope: Literal["step", "scenario", "global"] = Field(default="scenario", description="变量作用域")
+    is_secret: bool = Field(default=False, description="是否敏感变量")
+    is_enabled: bool = Field(default=True, description="是否启用")
+    sort: int = Field(default=0, description="排序值")
+
+
+class ApiExtractRuleUpdateReqData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(description="提取规则ID")
+    dataset_id: Optional[int] = Field(default=None, description="数据集ID")
+    var_name: Optional[str] = Field(default=None, description="变量名", min_length=1, max_length=64)
+    source_type: Optional[
+        Literal[
+            "response_header",
+            "response_json",
+            "response_cookie",
+            "response_text_regex",
+            "response_status",
+            "session",
+        ]
+    ] = Field(default=None, description="提取来源")
+    source_expr: Optional[str] = Field(default=None, description="提取表达式")
+    required: Optional[bool] = Field(default=None, description="是否必需")
+    default_value: Optional[Any] = Field(default=None, description="提取失败时默认值")
+    scope: Optional[Literal["step", "scenario", "global"]] = Field(default=None, description="变量作用域")
+    is_secret: Optional[bool] = Field(default=None, description="是否敏感变量")
+    is_enabled: Optional[bool] = Field(default=None, description="是否启用")
+    sort: Optional[int] = Field(default=None, description="排序值")
+
+
+class ApiExtractRuleDeleteReqData(BaseModel):
+    id: int = Field(description="提取规则ID")
+
+
+class ApiExtractRulePageReqData(CommonPage):
+    request_id: int
+    dataset_id: Optional[int] = None
+    is_deleted: int = 0
+    var_name: Optional[str] = None
+    source_type: Optional[
+        Literal[
+            "response_header",
+            "response_json",
+            "response_cookie",
+            "response_text_regex",
+            "response_status",
+            "session",
+            "",
+            None,
+        ]
+    ] = None

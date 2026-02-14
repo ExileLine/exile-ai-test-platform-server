@@ -14,8 +14,14 @@ from app.core.response import api_response
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiRequest, ApiRequestDataset
+from app.models.api_request import ApiEnvironment, ApiExtractRule, ApiRequest, ApiRequestDataset, ApiRequestRun, ApiRunVariable
+from app.services.api_request_executor import execute_api_request
+from app.services.variable_extractor import ExtractRequiredError, apply_extract_rules
 from app.schemas.api_request import (
+    ApiExtractRuleCreateReqData,
+    ApiExtractRuleDeleteReqData,
+    ApiExtractRulePageReqData,
+    ApiExtractRuleUpdateReqData,
     ApiRequestCreateReqData,
     ApiRequestDatasetCreateReqData,
     ApiRequestDatasetDeleteReqData,
@@ -25,6 +31,7 @@ from app.schemas.api_request import (
     ApiRequestDatasetUpdateReqData,
     ApiRequestDeleteReqData,
     ApiRequestPageReqData,
+    ApiRequestRunReqData,
     ApiRequestUpdateReqData,
 )
 
@@ -47,6 +54,22 @@ async def _get_dataset_or_404(db: AsyncSession, dataset_id: int) -> ApiRequestDa
     return obj
 
 
+async def _get_environment_or_404(db: AsyncSession, env_id: int) -> ApiEnvironment:
+    stmt = select(ApiEnvironment).where(and_(ApiEnvironment.id == env_id, ApiEnvironment.is_deleted == 0))
+    obj = (await db.execute(stmt)).scalars().first()
+    if not obj:
+        raise CustomException(detail=f"环境 {env_id} 不存在", custom_code=10002)
+    return obj
+
+
+async def _get_extract_rule_or_404(db: AsyncSession, rule_id: int) -> ApiExtractRule:
+    stmt = select(ApiExtractRule).where(and_(ApiExtractRule.id == rule_id, ApiExtractRule.is_deleted == 0))
+    obj = (await db.execute(stmt)).scalars().first()
+    if not obj:
+        raise CustomException(detail=f"提取规则 {rule_id} 不存在", custom_code=10002)
+    return obj
+
+
 async def _set_default_dataset(db: AsyncSession, request_obj: ApiRequest, dataset_obj: ApiRequestDataset):
     stmt = select(ApiRequestDataset).where(
         and_(ApiRequestDataset.request_id == request_obj.id, ApiRequestDataset.is_deleted == 0)
@@ -57,6 +80,47 @@ async def _set_default_dataset(db: AsyncSession, request_obj: ApiRequest, datase
         item.touch()
     request_obj.default_dataset_id = dataset_obj.id
     request_obj.touch()
+
+
+async def _resolve_dataset_for_run(
+    db: AsyncSession,
+    request_obj: ApiRequest,
+    dataset_id: int | None,
+) -> ApiRequestDataset | None:
+    target_dataset_id = dataset_id
+    if target_dataset_id is None and request_obj.default_dataset_id:
+        target_dataset_id = request_obj.default_dataset_id
+    if target_dataset_id is None:
+        return None
+
+    dataset_obj = await _get_dataset_or_404(db, target_dataset_id)
+    if dataset_obj.request_id != request_obj.id:
+        raise CustomException(detail="数据集与测试用例不匹配", custom_code=10005)
+    if not dataset_obj.is_enabled:
+        raise CustomException(detail="数据集已禁用", custom_code=10005)
+    return dataset_obj
+
+
+async def _list_extract_rules(db: AsyncSession, request_id: int, dataset_id: int | None) -> list[ApiExtractRule]:
+    stmt = (
+        select(ApiExtractRule)
+        .where(
+            and_(
+                ApiExtractRule.request_id == request_id,
+                ApiExtractRule.is_deleted == 0,
+                ApiExtractRule.is_enabled.is_(True),
+            )
+        )
+        .order_by(ApiExtractRule.sort, ApiExtractRule.id)
+    )
+    all_rules = (await db.execute(stmt)).scalars().all()
+    rule_list: list[ApiExtractRule] = []
+    for item in all_rules:
+        if item.dataset_id is None:
+            rule_list.append(item)
+        elif dataset_id is not None and item.dataset_id == dataset_id:
+            rule_list.append(item)
+    return rule_list
 
 
 @router.post("", summary="新增测试用例")
@@ -149,6 +213,184 @@ async def delete_api_request(
         item.modifier = admin.username
         item.touch()
 
+    await db.commit()
+    return api_response(code=204)
+
+
+@router.post("/run", summary="执行单个测试用例")
+async def run_api_request(
+    request_data: ApiRequestRunReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    request_obj = await _get_api_request_or_404(db, request_data.request_id)
+    dataset_obj = await _resolve_dataset_for_run(db, request_obj, request_data.dataset_id)
+
+    env_id = request_data.env_id if request_data.env_id is not None else request_obj.env_id
+    env_obj = None
+    if env_id is not None:
+        env_obj = await _get_environment_or_404(db, env_id)
+
+    exec_result = await execute_api_request(
+        request_obj=request_obj,
+        dataset_obj=dataset_obj,
+        environment_obj=env_obj,
+    )
+
+    run_obj = ApiRequestRun(
+        request_id=request_obj.id,
+        scenario_run_id=None,
+        scenario_id=None,
+        scenario_case_id=None,
+        dataset_id=dataset_obj.id if dataset_obj else None,
+        dataset_snapshot=exec_result["dataset_snapshot"],
+        request_snapshot=exec_result["request_snapshot"],
+        response_status_code=exec_result["response_status_code"],
+        response_headers=exec_result["response_headers"],
+        response_body=exec_result["response_body"],
+        response_time_ms=exec_result["response_time_ms"],
+        is_success=exec_result["is_success"],
+        error_message=exec_result["error_message"],
+    )
+    db.add(run_obj)
+    await db.flush()
+
+    extracted_variables: dict = {}
+    try:
+        rule_list = await _list_extract_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
+        extracted_variables, rule_records = apply_extract_rules(rule_list, exec_result, {})
+    except ExtractRequiredError as exc:
+        run_obj.is_success = False
+        if run_obj.error_message:
+            run_obj.error_message = f"{run_obj.error_message}; {str(exc)}"
+        else:
+            run_obj.error_message = str(exc)
+        rule_records = []
+
+    for item in rule_records:
+        db.add(
+            ApiRunVariable(
+                scenario_run_id=None,
+                request_run_id=run_obj.id,
+                scenario_case_id=None,
+                request_id=request_obj.id,
+                dataset_id=dataset_obj.id if dataset_obj else None,
+                var_name=item["var_name"],
+                var_value=item["var_value"],
+                value_type=item["value_type"],
+                source_type=item["source_type"],
+                source_expr=item["source_expr"],
+                scope=item["scope"],
+                is_secret=item["is_secret"],
+            )
+        )
+
+    request_obj.execute_count = (request_obj.execute_count or 0) + 1
+    request_obj.modifier_id = admin.id
+    request_obj.modifier = admin.username
+    request_obj.touch()
+
+    await db.commit()
+    await db.refresh(run_obj)
+    return api_response(
+        http_code=status.HTTP_201_CREATED,
+        code=201,
+        data={
+            "run_id": run_obj.id,
+            "request_id": request_obj.id,
+            "dataset_id": run_obj.dataset_id,
+            "is_success": run_obj.is_success,
+            "response_status_code": run_obj.response_status_code,
+            "response_time_ms": run_obj.response_time_ms,
+            "error_message": run_obj.error_message,
+            "extracted_variables": extracted_variables,
+        },
+    )
+
+
+@router.post("/extract", summary="新增变量提取规则")
+async def create_extract_rule(
+    request_data: ApiExtractRuleCreateReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    request_obj = await _get_api_request_or_404(db, request_data.request_id)
+    if request_data.dataset_id is not None:
+        dataset_obj = await _get_dataset_or_404(db, request_data.dataset_id)
+        if dataset_obj.request_id != request_obj.id:
+            raise CustomException(detail="数据集与测试用例不匹配", custom_code=10005)
+
+    save_data = request_data.model_dump(exclude_unset=True)
+    obj = ApiExtractRule(**save_data)
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return api_response(http_code=status.HTTP_201_CREATED, code=201, data={"id": obj.id})
+
+
+@router.put("/extract", summary="编辑变量提取规则")
+async def update_extract_rule(
+    request_data: ApiExtractRuleUpdateReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_extract_rule_or_404(db, request_data.id)
+    request_obj = await _get_api_request_or_404(db, obj.request_id)
+
+    update_data = request_data.model_dump(exclude_unset=True)
+    update_data.pop("id", None)
+    if "dataset_id" in update_data and update_data["dataset_id"] is not None:
+        dataset_obj = await _get_dataset_or_404(db, update_data["dataset_id"])
+        if dataset_obj.request_id != request_obj.id:
+            raise CustomException(detail="数据集与测试用例不匹配", custom_code=10005)
+
+    if update_data:
+        for k, v in update_data.items():
+            setattr(obj, k, v)
+        obj.touch()
+        await db.commit()
+    return api_response(http_code=status.HTTP_201_CREATED, code=201)
+
+
+@router.get("/extract/{rule_id}", summary="变量提取规则详情")
+async def extract_rule_detail(
+    rule_id: int,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_extract_rule_or_404(db, rule_id)
+    return api_response(data=jsonable_encoder(obj.to_dict()))
+
+
+@router.post("/extract/page", summary="变量提取规则分页")
+async def extract_rule_page(
+    request_data: ApiExtractRulePageReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    await _get_api_request_or_404(db, request_data.request_id)
+    pq = CommonPaginateQuery(
+        request_data=request_data,
+        orm_model=ApiExtractRule,
+        db_session=db,
+        like_list=["var_name"],
+        where_list=["request_id", "dataset_id", "is_deleted", "source_type"],
+        order_by_list=["sort", "id"],
+        skip_list=["is_deleted"],
+    )
+    await pq.build_query()
+    return api_response(data=pq.normal_data)
+
+
+@router.delete("/extract", summary="删除变量提取规则")
+async def delete_extract_rule(
+    request_data: ApiExtractRuleDeleteReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_extract_rule_or_404(db, request_data.id)
+    obj.is_deleted = admin.id
+    obj.touch()
     await db.commit()
     return api_response(code=204)
 
