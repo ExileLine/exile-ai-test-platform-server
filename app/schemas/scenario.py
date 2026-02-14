@@ -125,3 +125,7 @@ class TestScenarioRunReqData(BaseModel):
     env_id: Optional[int] = Field(default=None, description="覆盖环境ID")
     trigger_type: Literal["manual", "schedule"] = Field(default="manual", description="触发类型")
     initial_variables: dict = Field(default_factory=dict, description="初始变量上下文")
+
+
+class TestScenarioCancelRunReqData(BaseModel):
+    scenario_run_id: int = Field(description="场景运行ID")

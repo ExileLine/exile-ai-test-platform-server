@@ -14,9 +14,11 @@ from app.core.response import api_response
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiRequest, ApiRequestDataset, TestScenario, TestScenarioCase
-from app.services.scenario_runner import run_test_scenario
+from app.models.api_request import ApiRequest, ApiRequestDataset, TestScenario, TestScenarioCase, TestScenarioRun
+from app.services.scenario_task_dispatcher import dispatch_scenario_run_task
+from app.services.scenario_runner import build_scenario_run_result
 from app.schemas.scenario import (
+    TestScenarioCancelRunReqData,
     TestScenarioCaseCreateReqData,
     TestScenarioCaseDeleteReqData,
     TestScenarioCasePageReqData,
@@ -46,6 +48,14 @@ async def _get_scenario_case_or_404(db: AsyncSession, scenario_case_id: int) -> 
     obj = (await db.execute(stmt)).scalars().first()
     if not obj:
         raise CustomException(detail=f"场景步骤 {scenario_case_id} 不存在", custom_code=10002)
+    return obj
+
+
+async def _get_scenario_run_or_404(db: AsyncSession, scenario_run_id: int) -> TestScenarioRun:
+    stmt = select(TestScenarioRun).where(and_(TestScenarioRun.id == scenario_run_id, TestScenarioRun.is_deleted == 0))
+    obj = (await db.execute(stmt)).scalars().first()
+    if not obj:
+        raise CustomException(detail=f"场景运行 {scenario_run_id} 不存在", custom_code=10002)
     return obj
 
 
@@ -108,6 +118,75 @@ async def _reorder_scenario_step(
             step_obj.touch()
 
     return target_step_no
+
+
+@router.post("/run", summary="执行测试场景(异步入队)")
+async def run_scenario(
+    request_data: TestScenarioRunReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    scenario_obj = await _get_scenario_or_404(db, request_data.scenario_id)
+
+    scenario_run = TestScenarioRun(
+        scenario_id=scenario_obj.id,
+        env_id=request_data.env_id,
+        trigger_type=request_data.trigger_type,
+        run_status="queued",
+        cancel_requested=False,
+        total_request_runs=0,
+        success_request_runs=0,
+        failed_request_runs=0,
+        is_success=False,
+        runtime_variables=request_data.initial_variables,
+        error_message=None,
+    )
+    db.add(scenario_run)
+    await db.commit()
+    await db.refresh(scenario_run)
+
+    try:
+        task_id = dispatch_scenario_run_task(scenario_run.id)
+    except Exception as exc:
+        scenario_run.run_status = "failed"
+        scenario_run.error_message = f"入队失败: {str(exc)}"
+        scenario_run.touch()
+        await db.commit()
+        raise CustomException(detail="场景执行入队失败", custom_code=500)
+
+    result_data = build_scenario_run_result(scenario_run)
+    if task_id:
+        result_data["task_id"] = task_id
+    return api_response(
+        http_code=status.HTTP_202_ACCEPTED,
+        code=202,
+        data=result_data,
+    )
+
+
+@router.get("/run/{scenario_run_id}", summary="测试场景运行详情")
+async def scenario_run_detail(
+    scenario_run_id: int,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    scenario_run = await _get_scenario_run_or_404(db, scenario_run_id)
+    return api_response(data=build_scenario_run_result(scenario_run))
+
+
+@router.post("/run/cancel", summary="取消测试场景运行")
+async def cancel_scenario_run(
+    request_data: TestScenarioCancelRunReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    scenario_run = await _get_scenario_run_or_404(db, request_data.scenario_run_id)
+    if scenario_run.run_status in {"success", "failed", "canceled"}:
+        return api_response(code=10005, message=f"当前状态 {scenario_run.run_status} 不可取消")
+    scenario_run.cancel_requested = True
+    scenario_run.touch()
+    await db.commit()
+    return api_response(http_code=status.HTTP_201_CREATED, code=201, data=build_scenario_run_result(scenario_run))
 
 
 @router.post("", summary="新增测试场景")
@@ -343,21 +422,3 @@ async def set_test_scenario_case_dataset_strategy(
     obj.touch()
     await db.commit()
     return api_response(http_code=status.HTTP_201_CREATED, code=201)
-
-
-@router.post("/run", summary="执行测试场景")
-async def run_scenario(
-    request_data: TestScenarioRunReqData,
-    admin: Admin = Depends(check_admin_existence),
-    db: AsyncSession = Depends(get_db_session),
-):
-    scenario_obj = await _get_scenario_or_404(db, request_data.scenario_id)
-    result = await run_test_scenario(
-        db=db,
-        scenario_obj=scenario_obj,
-        env_id=request_data.env_id,
-        trigger_type=request_data.trigger_type,
-        initial_variables=request_data.initial_variables,
-    )
-    await db.commit()
-    return api_response(http_code=status.HTTP_201_CREATED, code=201, data=result)

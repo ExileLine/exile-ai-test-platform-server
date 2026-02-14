@@ -13,7 +13,12 @@ from app.core.exceptions import CustomException
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiRequest, TestScenario as ScenarioModel, TestScenarioCase as ScenarioCaseModel
+from app.models.api_request import (
+    ApiRequest,
+    TestScenario as ScenarioModel,
+    TestScenarioCase as ScenarioCaseModel,
+    TestScenarioRun as ScenarioRunModel,
+)
 
 
 class FakeDBSession:
@@ -107,6 +112,27 @@ def _build_scenario_case(**kwargs) -> ScenarioCaseModel:
         is_deleted=kwargs.pop("is_deleted", 0),
     )
     obj.id = kwargs.pop("id", 21)
+    for k, v in kwargs.items():
+        setattr(obj, k, v)
+    return obj
+
+
+def _build_scenario_run(**kwargs) -> ScenarioRunModel:
+    obj = ScenarioRunModel(
+        scenario_id=kwargs.pop("scenario_id", 11),
+        env_id=kwargs.pop("env_id", None),
+        trigger_type=kwargs.pop("trigger_type", "manual"),
+        run_status=kwargs.pop("run_status", "queued"),
+        cancel_requested=kwargs.pop("cancel_requested", False),
+        total_request_runs=kwargs.pop("total_request_runs", 0),
+        success_request_runs=kwargs.pop("success_request_runs", 0),
+        failed_request_runs=kwargs.pop("failed_request_runs", 0),
+        is_success=kwargs.pop("is_success", False),
+        runtime_variables=kwargs.pop("runtime_variables", {}),
+        error_message=kwargs.pop("error_message", None),
+        is_deleted=kwargs.pop("is_deleted", 0),
+    )
+    obj.id = kwargs.pop("id", 91)
     for k, v in kwargs.items():
         setattr(obj, k, v)
     return obj
@@ -394,31 +420,25 @@ def test_test_scenario_case_page_success(monkeypatch: pytest.MonkeyPatch, client
     assert body["data"]["records"][0]["step_no"] == 1
 
 
-def test_run_scenario_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+def test_run_scenario_enqueue_success(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    fake_db: FakeDBSession,
+):
     scenario_obj = _build_scenario(id=20)
+    called = {"run_id": None, "task_id": None}
 
     async def _fake_get_scenario(db, scenario_id: int):
         assert scenario_id == 20
         return scenario_obj
 
-    async def _fake_run_test_scenario(*, db, scenario_obj, env_id, trigger_type, initial_variables):
-        assert scenario_obj.id == 20
-        assert env_id == 1
-        assert trigger_type == "manual"
-        assert initial_variables == {"uid": "u1"}
-        return {
-            "scenario_run_id": 999,
-            "scenario_id": 20,
-            "is_success": True,
-            "total_request_runs": 2,
-            "success_request_runs": 2,
-            "failed_request_runs": 0,
-            "error_message": None,
-            "runtime_variables": {"uid": "u1", "token": "abc"},
-        }
+    def _fake_dispatch(run_id: int):
+        called["run_id"] = run_id
+        called["task_id"] = "celery-task-001"
+        return called["task_id"]
 
     monkeypatch.setattr(scenario_router, "_get_scenario_or_404", _fake_get_scenario)
-    monkeypatch.setattr(scenario_router, "run_test_scenario", _fake_run_test_scenario)
+    monkeypatch.setattr(scenario_router, "dispatch_scenario_run_task", _fake_dispatch)
 
     resp = client.post(
         "/api/scenario/run",
@@ -426,8 +446,48 @@ def test_run_scenario_success(monkeypatch: pytest.MonkeyPatch, client: TestClien
     )
     body = resp.json()
 
+    assert resp.status_code == 202
+    assert body["code"] == 202
+    assert len(fake_db.added) == 1
+    run_obj = fake_db.added[0]
+    assert run_obj.run_status == "queued"
+    assert run_obj.runtime_variables["uid"] == "u1"
+    assert called["run_id"] == run_obj.id
+    assert body["data"]["task_id"] == called["task_id"]
+
+
+def test_scenario_run_detail_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    run_obj = _build_scenario_run(id=92, scenario_id=21, run_status="running", total_request_runs=3)
+
+    async def _fake_get_scenario_run(db, scenario_run_id: int):
+        assert scenario_run_id == 92
+        return run_obj
+
+    monkeypatch.setattr(scenario_router, "_get_scenario_run_or_404", _fake_get_scenario_run)
+
+    resp = client.get("/api/scenario/run/92")
+    body = resp.json()
+
+    assert resp.status_code == 200
+    assert body["code"] == 200
+    assert body["data"]["scenario_run_id"] == 92
+    assert body["data"]["run_status"] == "running"
+    assert body["data"]["total_request_runs"] == 3
+
+
+def test_cancel_scenario_run_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    run_obj = _build_scenario_run(id=93, scenario_id=22, run_status="running", cancel_requested=False)
+
+    async def _fake_get_scenario_run(db, scenario_run_id: int):
+        assert scenario_run_id == 93
+        return run_obj
+
+    monkeypatch.setattr(scenario_router, "_get_scenario_run_or_404", _fake_get_scenario_run)
+
+    resp = client.post("/api/scenario/run/cancel", json={"scenario_run_id": 93})
+    body = resp.json()
+
     assert resp.status_code == 201
     assert body["code"] == 201
-    assert body["data"]["scenario_run_id"] == 999
-    assert body["data"]["is_success"] is True
-    assert body["data"]["runtime_variables"]["token"] == "abc"
+    assert run_obj.cancel_requested is True
+    assert body["data"]["cancel_requested"] is True

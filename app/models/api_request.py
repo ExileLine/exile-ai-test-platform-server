@@ -192,7 +192,15 @@ class TestScenarioRun(CustomBaseModel):
     __tablename__ = "exile_test_scenario_runs"
 
     scenario_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="场景ID")
+    env_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="执行环境ID")
     trigger_type: Mapped[str] = mapped_column(String(16), nullable=False, default="manual", comment="触发类型:manual/schedule")
+    run_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="queued",
+        comment="运行状态:queued/running/success/failed/canceled",
+    )
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否请求取消")
     total_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行总次数")
     success_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行成功次数")
     failed_request_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="请求执行失败次数")

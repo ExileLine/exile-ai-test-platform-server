@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
 import json
 import os
 import threading
@@ -30,6 +31,7 @@ from app.models.api_request import (
     TestScenarioRun as ScenarioRunModel,
 )
 from app.models.base import Base
+from app.services.scenario_run_queue import process_scenario_run_message
 
 TEST_ADMIN_ID = 910001
 TEST_ADMIN_NAME = "ut_admin_real"
@@ -55,6 +57,11 @@ REQUIRED_COLUMNS = {
     ],
     "exile_api_request_runs": [
         ("scenario_run_id", "BIGINT NULL COMMENT '场景运行ID'"),
+    ],
+    "exile_test_scenario_runs": [
+        ("env_id", "BIGINT NULL COMMENT '执行环境ID'"),
+        ("run_status", "VARCHAR(16) NOT NULL DEFAULT 'queued' COMMENT '运行状态:queued/running/success/failed/canceled'"),
+        ("cancel_requested", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否请求取消'"),
     ],
 }
 
@@ -452,18 +459,35 @@ async def test_real_scenario_run_with_extracted_variables(
             json={"scenario_id": scenario_id, "trigger_type": "manual"},
             headers=auth_headers,
         )
-        assert run_resp.status_code == 201
+        assert run_resp.status_code == 202
         run_body = run_resp.json()
-        assert run_body["code"] == 201
-        assert run_body["data"]["is_success"] is True
-        assert run_body["data"]["total_request_runs"] == 2
+        assert run_body["code"] == 202
+        assert run_body["data"]["run_status"] == "queued"
         scenario_run_id = run_body["data"]["scenario_run_id"]
+
+        processed = await process_scenario_run_message({"scenario_run_id": scenario_run_id})
+        assert processed is True
+
+        detail_body = None
+        for _ in range(50):
+            detail_resp = await client.get(f"/api/scenario/run/{scenario_run_id}", headers=auth_headers)
+            assert detail_resp.status_code == 200
+            detail_body = detail_resp.json()
+            assert detail_body["code"] == 200
+            if detail_body["data"]["run_status"] in {"success", "failed", "canceled"}:
+                break
+            await asyncio.sleep(0.1)
+
+        assert detail_body is not None
+        assert detail_body["data"]["run_status"] == "success"
+        assert detail_body["data"]["total_request_runs"] == 2
 
     async with AsyncSessionLocal() as session:
         scenario_run = (
             await session.execute(select(ScenarioRunModel).where(ScenarioRunModel.id == scenario_run_id))
         ).scalars().first()
         assert scenario_run is not None
+        assert scenario_run.run_status == "success"
         assert scenario_run.is_success is True
         assert scenario_run.runtime_variables["token"] == "tk_abc_001"
         assert scenario_run.runtime_variables["session_id"] == "sid_001"

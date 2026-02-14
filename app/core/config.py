@@ -125,6 +125,9 @@ class BaseConfig(BaseSettings):
     REDIS_PWD: str
     REDIS_DB: int
     DECODE_RESPONSES: bool
+    CELERY_BROKER_URL: Optional[str] = None
+    CELERY_RESULT_BACKEND: Optional[str] = None
+    CELERY_TASK_QUEUE: str = "exile_scenario_tasks"
 
     # 日志脱敏配置
     SENSITIVE_HEADERS: str = "authorization,cookie,set-cookie,x-api-key"
@@ -156,7 +159,21 @@ class BaseConfig(BaseSettings):
 
     @property
     def redis_url(self) -> str:
-        return f"redis://:{self.REDIS_PWD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}?decode_responses={self.DECODE_RESPONSES}"
+        auth = f":{self.REDIS_PWD}@" if self.REDIS_PWD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}?decode_responses={self.DECODE_RESPONSES}"
+
+    @property
+    def redis_transport_url(self) -> str:
+        auth = f":{self.REDIS_PWD}@" if self.REDIS_PWD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    @property
+    def celery_broker_url(self) -> str:
+        return self.CELERY_BROKER_URL or self.redis_transport_url
+
+    @property
+    def celery_result_backend(self) -> str:
+        return self.CELERY_RESULT_BACKEND or self.redis_transport_url
 
     @property
     def mysql_url(self) -> str:

@@ -56,7 +56,10 @@ def upgrade() -> None:
     op.create_table(
         "exile_test_scenario_runs",
         sa.Column("scenario_id", sa.BigInteger(), nullable=False, comment="场景ID"),
+        sa.Column("env_id", sa.BigInteger(), nullable=True, comment="执行环境ID"),
         sa.Column("trigger_type", sa.String(length=16), nullable=False, comment="触发类型:manual/schedule"),
+        sa.Column("run_status", sa.String(length=16), nullable=False, comment="运行状态:queued/running/success/failed/canceled"),
+        sa.Column("cancel_requested", sa.Boolean(), nullable=False, comment="是否请求取消"),
         sa.Column("total_request_runs", sa.Integer(), nullable=False, comment="请求执行总次数"),
         sa.Column("success_request_runs", sa.Integer(), nullable=False, comment="请求执行成功次数"),
         sa.Column("failed_request_runs", sa.Integer(), nullable=False, comment="请求执行失败次数"),
@@ -103,4 +106,3 @@ def downgrade() -> None:
     op.drop_table("exile_test_scenario_runs")
     op.drop_table("exile_api_extract_rules")
     op.drop_column("exile_api_request_runs", "scenario_run_id")
-

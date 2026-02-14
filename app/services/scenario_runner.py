@@ -119,32 +119,44 @@ async def _query_extract_rules(
     return result
 
 
-async def run_test_scenario(
+def build_scenario_run_result(scenario_run: TestScenarioRun) -> dict[str, Any]:
+    return {
+        "scenario_run_id": scenario_run.id,
+        "scenario_id": scenario_run.scenario_id,
+        "run_status": scenario_run.run_status,
+        "cancel_requested": scenario_run.cancel_requested,
+        "is_success": scenario_run.is_success,
+        "total_request_runs": scenario_run.total_request_runs,
+        "success_request_runs": scenario_run.success_request_runs,
+        "failed_request_runs": scenario_run.failed_request_runs,
+        "error_message": scenario_run.error_message,
+        "runtime_variables": copy.deepcopy(scenario_run.runtime_variables or {}),
+    }
+
+
+async def run_scenario_with_existing_run(
     *,
     db: AsyncSession,
     scenario_obj: TestScenario,
-    env_id: int | None = None,
-    trigger_type: str = "manual",
-    initial_variables: dict[str, Any] | None = None,
+    scenario_run: TestScenarioRun,
 ) -> dict[str, Any]:
-    runtime_variables: dict[str, Any] = copy.deepcopy(initial_variables or {})
+    runtime_variables: dict[str, Any] = copy.deepcopy(scenario_run.runtime_variables or {})
+    total_request_runs = 0
+    success_request_runs = 0
+    failed_request_runs = 0
 
-    resolved_env_id = env_id if env_id is not None else scenario_obj.env_id
+    resolved_env_id = scenario_run.env_id if scenario_run.env_id is not None else scenario_obj.env_id
     environment_obj = None
     if resolved_env_id is not None:
         environment_obj = await _get_environment_or_404(db, resolved_env_id)
 
-    scenario_run = TestScenarioRun(
-        scenario_id=scenario_obj.id,
-        trigger_type=trigger_type,
-        total_request_runs=0,
-        success_request_runs=0,
-        failed_request_runs=0,
-        is_success=False,
-        runtime_variables={},
-        error_message=None,
-    )
-    db.add(scenario_run)
+    scenario_run.run_status = "running"
+    scenario_run.total_request_runs = total_request_runs
+    scenario_run.success_request_runs = success_request_runs
+    scenario_run.failed_request_runs = failed_request_runs
+    scenario_run.is_success = False
+    scenario_run.error_message = None
+    scenario_run.touch()
     await db.flush()
 
     stmt = (
@@ -161,106 +173,153 @@ async def run_test_scenario(
     step_list = (await db.execute(stmt)).scalars().all()
 
     stop_message = None
-    for step in step_list:
-        request_obj = await _get_request_or_404(db, step.request_id)
-        dataset_list = await _resolve_step_datasets(db, request_obj, step)
+    try:
+        for step in step_list:
+            await db.refresh(scenario_run, attribute_names=["cancel_requested"])
+            if scenario_run.cancel_requested:
+                stop_message = "场景执行已取消"
+                break
 
-        for dataset_obj in dataset_list:
-            execute_result = await execute_api_request(
-                request_obj=request_obj,
-                dataset_obj=dataset_obj,
-                environment_obj=environment_obj,
-                runtime_variables=runtime_variables,
-            )
+            request_obj = await _get_request_or_404(db, step.request_id)
+            dataset_list = await _resolve_step_datasets(db, request_obj, step)
 
-            run_obj = ApiRequestRun(
-                request_id=request_obj.id,
-                scenario_run_id=scenario_run.id,
-                scenario_id=scenario_obj.id,
-                scenario_case_id=step.id,
-                dataset_id=dataset_obj.id if dataset_obj else None,
-                dataset_snapshot=execute_result["dataset_snapshot"],
-                request_snapshot=execute_result["request_snapshot"],
-                response_status_code=execute_result["response_status_code"],
-                response_headers=execute_result["response_headers"],
-                response_body=execute_result["response_body"],
-                response_time_ms=execute_result["response_time_ms"],
-                is_success=execute_result["is_success"],
-                error_message=execute_result["error_message"],
-            )
-            db.add(run_obj)
-            await db.flush()
-
-            request_obj.execute_count = (request_obj.execute_count or 0) + 1
-            request_obj.touch()
-
-            extract_error = None
-            rule_records: list[dict[str, Any]] = []
-            extracted_variables: dict[str, Any] = {}
-            try:
-                rules = await _query_extract_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
-                extracted_variables, rule_records = apply_extract_rules(rules, execute_result, runtime_variables)
-            except ExtractRequiredError as exc:
-                extract_error = str(exc)
-                run_obj.is_success = False
-
-            if extract_error:
-                if run_obj.error_message:
-                    run_obj.error_message = f"{run_obj.error_message}; {extract_error}"
-                else:
-                    run_obj.error_message = extract_error
-
-            for item in rule_records:
-                db.add(
-                    ApiRunVariable(
-                        scenario_run_id=scenario_run.id,
-                        request_run_id=run_obj.id,
-                        scenario_case_id=step.id,
-                        request_id=request_obj.id,
-                        dataset_id=dataset_obj.id if dataset_obj else None,
-                        var_name=item["var_name"],
-                        var_value=item["var_value"],
-                        value_type=item["value_type"],
-                        source_type=item["source_type"],
-                        source_expr=item["source_expr"],
-                        scope=item["scope"],
-                        is_secret=item["is_secret"],
-                    )
-                )
-
-            for item in rule_records:
-                if item["scope"] in {"scenario", "global"}:
-                    runtime_variables[item["var_name"]] = item["var_value"]
-
-            scenario_run.total_request_runs += 1
-            if run_obj.is_success:
-                scenario_run.success_request_runs += 1
-            else:
-                scenario_run.failed_request_runs += 1
-                stop_on_fail = bool(step.stop_on_fail or scenario_obj.stop_on_fail)
-                if stop_on_fail:
-                    stop_message = (
-                        f"步骤 {step.step_no} 执行失败: request_id={request_obj.id}, "
-                        f"dataset_id={dataset_obj.id if dataset_obj else 'none'}"
-                    )
+            for dataset_obj in dataset_list:
+                await db.refresh(scenario_run, attribute_names=["cancel_requested"])
+                if scenario_run.cancel_requested:
+                    stop_message = "场景执行已取消"
                     break
 
-        if stop_message:
-            break
+                execute_result = await execute_api_request(
+                    request_obj=request_obj,
+                    dataset_obj=dataset_obj,
+                    environment_obj=environment_obj,
+                    runtime_variables=runtime_variables,
+                )
 
-    scenario_run.is_success = scenario_run.failed_request_runs == 0
+                run_obj = ApiRequestRun(
+                    request_id=request_obj.id,
+                    scenario_run_id=scenario_run.id,
+                    scenario_id=scenario_obj.id,
+                    scenario_case_id=step.id,
+                    dataset_id=dataset_obj.id if dataset_obj else None,
+                    dataset_snapshot=execute_result["dataset_snapshot"],
+                    request_snapshot=execute_result["request_snapshot"],
+                    response_status_code=execute_result["response_status_code"],
+                    response_headers=execute_result["response_headers"],
+                    response_body=execute_result["response_body"],
+                    response_time_ms=execute_result["response_time_ms"],
+                    is_success=execute_result["is_success"],
+                    error_message=execute_result["error_message"],
+                )
+                db.add(run_obj)
+                await db.flush()
+
+                request_obj.execute_count = (request_obj.execute_count or 0) + 1
+                request_obj.touch()
+
+                extract_error = None
+                rule_records: list[dict[str, Any]] = []
+                try:
+                    rules = await _query_extract_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
+                    _, rule_records = apply_extract_rules(rules, execute_result, runtime_variables)
+                except ExtractRequiredError as exc:
+                    extract_error = str(exc)
+                    run_obj.is_success = False
+
+                if extract_error:
+                    if run_obj.error_message:
+                        run_obj.error_message = f"{run_obj.error_message}; {extract_error}"
+                    else:
+                        run_obj.error_message = extract_error
+
+                for item in rule_records:
+                    db.add(
+                        ApiRunVariable(
+                            scenario_run_id=scenario_run.id,
+                            request_run_id=run_obj.id,
+                            scenario_case_id=step.id,
+                            request_id=request_obj.id,
+                            dataset_id=dataset_obj.id if dataset_obj else None,
+                            var_name=item["var_name"],
+                            var_value=item["var_value"],
+                            value_type=item["value_type"],
+                            source_type=item["source_type"],
+                            source_expr=item["source_expr"],
+                            scope=item["scope"],
+                            is_secret=item["is_secret"],
+                        )
+                    )
+
+                for item in rule_records:
+                    if item["scope"] in {"scenario", "global"}:
+                        runtime_variables[item["var_name"]] = item["var_value"]
+
+                total_request_runs += 1
+                if run_obj.is_success:
+                    success_request_runs += 1
+                else:
+                    failed_request_runs += 1
+                    stop_on_fail = bool(step.stop_on_fail or scenario_obj.stop_on_fail)
+                    if stop_on_fail:
+                        stop_message = (
+                            f"步骤 {step.step_no} 执行失败: request_id={request_obj.id}, "
+                            f"dataset_id={dataset_obj.id if dataset_obj else 'none'}"
+                        )
+                        break
+
+            if stop_message:
+                break
+    except Exception as exc:
+        failed_request_runs += 1
+        stop_message = str(exc)
+
+    if scenario_run.cancel_requested:
+        scenario_run.run_status = "canceled"
+        scenario_run.is_success = False
+        if not stop_message:
+            stop_message = "场景执行已取消"
+    elif failed_request_runs == 0:
+        scenario_run.run_status = "success"
+        scenario_run.is_success = True
+    else:
+        scenario_run.run_status = "failed"
+        scenario_run.is_success = False
+
+    scenario_run.total_request_runs = total_request_runs
+    scenario_run.success_request_runs = success_request_runs
+    scenario_run.failed_request_runs = failed_request_runs
     scenario_run.runtime_variables = runtime_variables
     scenario_run.error_message = stop_message
     scenario_run.touch()
 
-    return {
-        "scenario_run_id": scenario_run.id,
-        "scenario_id": scenario_obj.id,
-        "is_success": scenario_run.is_success,
-        "total_request_runs": scenario_run.total_request_runs,
-        "success_request_runs": scenario_run.success_request_runs,
-        "failed_request_runs": scenario_run.failed_request_runs,
-        "error_message": scenario_run.error_message,
-        "runtime_variables": runtime_variables,
-    }
+    return build_scenario_run_result(scenario_run)
 
+
+async def run_test_scenario(
+    *,
+    db: AsyncSession,
+    scenario_obj: TestScenario,
+    env_id: int | None = None,
+    trigger_type: str = "manual",
+    initial_variables: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scenario_run = TestScenarioRun(
+        scenario_id=scenario_obj.id,
+        env_id=env_id,
+        trigger_type=trigger_type,
+        run_status="running",
+        cancel_requested=False,
+        total_request_runs=0,
+        success_request_runs=0,
+        failed_request_runs=0,
+        is_success=False,
+        runtime_variables=copy.deepcopy(initial_variables or {}),
+        error_message=None,
+    )
+    db.add(scenario_run)
+    await db.flush()
+    return await run_scenario_with_existing_run(
+        db=db,
+        scenario_obj=scenario_obj,
+        scenario_run=scenario_run,
+    )
