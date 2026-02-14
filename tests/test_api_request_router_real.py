@@ -18,7 +18,7 @@ from app.core.exception_handlers import register_exception_handlers
 from app.db.redis_client import close_redis_connection_pool, create_redis_connection_pool
 from app.db.session import AsyncSessionLocal, engine
 from app.models.admin import Admin
-from app.models.api_request import ApiRequest, ApiRequestDataset, ApiRequestRun
+from app.models.api_request import ApiAssertRule, ApiRequest, ApiRequestDataset, ApiRequestRun
 from app.models.base import Base
 
 TEST_ADMIN_ID = 910001
@@ -182,10 +182,12 @@ async def auth_headers():
                 )
             ).scalars().all()
             if request_ids:
+                await session.execute(delete(ApiAssertRule).where(ApiAssertRule.request_id.in_(request_ids)))
                 await session.execute(delete(ApiRequestRun).where(ApiRequestRun.request_id.in_(request_ids)))
                 await session.execute(delete(ApiRequestDataset).where(ApiRequestDataset.request_id.in_(request_ids)))
                 await session.execute(delete(ApiRequest).where(ApiRequest.id.in_(request_ids)))
             else:
+                await session.execute(delete(ApiAssertRule))
                 await session.execute(delete(ApiRequestDataset).where(ApiRequestDataset.creator_id == TEST_ADMIN_ID))
                 await session.execute(
                     delete(ApiRequest).where(
@@ -389,3 +391,62 @@ async def test_real_run_api_request_and_persist_run_record(
         assert run_obj.request_snapshot["body_data"]["amount"] == 99
         assert run_obj.request_snapshot["body_data"]["tag"] == "ok"
         assert request_obj.execute_count >= 1
+
+
+@pytest.mark.anyio
+async def test_real_assert_rule_make_run_fail_and_run_detail(
+    app: FastAPI,
+    auth_headers: dict,
+    echo_server_url: str,
+):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_id = await _create_case(
+            client,
+            auth_headers,
+            method="GET",
+            url=f"{echo_server_url}/health",
+            body_type="none",
+        )
+
+        create_assert_resp = await client.post(
+            "/api/case/assert",
+            json={
+                "request_id": request_id,
+                "assert_type": "status_code",
+                "comparator": "eq",
+                "expected_value": 201,
+                "message": "状态码必须为201",
+            },
+            headers=auth_headers,
+        )
+        assert create_assert_resp.status_code == 201
+
+        run_resp = await client.post(
+            "/api/case/run",
+            json={"request_id": request_id},
+            headers=auth_headers,
+        )
+        assert run_resp.status_code == 201
+        run_body = run_resp.json()
+        assert run_body["code"] == 201
+        assert run_body["data"]["is_success"] is False
+        assert run_body["data"]["assertion_total"] == 1
+        assert run_body["data"]["assertion_failed"] == 1
+        run_id = run_body["data"]["run_id"]
+
+        run_detail_resp = await client.get(f"/api/case/run/{run_id}", headers=auth_headers)
+        assert run_detail_resp.status_code == 200
+        run_detail_body = run_detail_resp.json()
+        assert run_detail_body["code"] == 200
+        assert run_detail_body["data"]["id"] == run_id
+        assert run_detail_body["data"]["is_success"] is False
+        assert run_detail_body["data"]["response_status_code"] == 200
+        assert run_detail_body["data"]["error_message"] is not None
+        assert "断言失败" in run_detail_body["data"]["error_message"]
+
+    async with AsyncSessionLocal() as session:
+        run_obj = (await session.execute(select(ApiRequestRun).where(ApiRequestRun.id == run_id))).scalars().first()
+        assert run_obj is not None
+        assert run_obj.is_success is False
+        assert run_obj.error_message is not None
+        assert "断言失败" in run_obj.error_message

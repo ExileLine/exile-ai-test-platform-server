@@ -14,10 +14,23 @@ from app.core.response import api_response
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiEnvironment, ApiExtractRule, ApiRequest, ApiRequestDataset, ApiRequestRun, ApiRunVariable
+from app.models.api_request import (
+    ApiAssertRule,
+    ApiEnvironment,
+    ApiExtractRule,
+    ApiRequest,
+    ApiRequestDataset,
+    ApiRequestRun,
+    ApiRunVariable,
+)
+from app.services.assertion_evaluator import evaluate_assert_rules
 from app.services.api_request_executor import execute_api_request
 from app.services.variable_extractor import ExtractRequiredError, apply_extract_rules
 from app.schemas.api_request import (
+    ApiAssertRuleCreateReqData,
+    ApiAssertRuleDeleteReqData,
+    ApiAssertRulePageReqData,
+    ApiAssertRuleUpdateReqData,
     ApiExtractRuleCreateReqData,
     ApiExtractRuleDeleteReqData,
     ApiExtractRulePageReqData,
@@ -70,6 +83,22 @@ async def _get_extract_rule_or_404(db: AsyncSession, rule_id: int) -> ApiExtract
     return obj
 
 
+async def _get_assert_rule_or_404(db: AsyncSession, rule_id: int) -> ApiAssertRule:
+    stmt = select(ApiAssertRule).where(and_(ApiAssertRule.id == rule_id, ApiAssertRule.is_deleted == 0))
+    obj = (await db.execute(stmt)).scalars().first()
+    if not obj:
+        raise CustomException(detail=f"断言规则 {rule_id} 不存在", custom_code=10002)
+    return obj
+
+
+async def _get_request_run_or_404(db: AsyncSession, run_id: int) -> ApiRequestRun:
+    stmt = select(ApiRequestRun).where(and_(ApiRequestRun.id == run_id, ApiRequestRun.is_deleted == 0))
+    obj = (await db.execute(stmt)).scalars().first()
+    if not obj:
+        raise CustomException(detail=f"运行记录 {run_id} 不存在", custom_code=10002)
+    return obj
+
+
 async def _set_default_dataset(db: AsyncSession, request_obj: ApiRequest, dataset_obj: ApiRequestDataset):
     stmt = select(ApiRequestDataset).where(
         and_(ApiRequestDataset.request_id == request_obj.id, ApiRequestDataset.is_deleted == 0)
@@ -115,6 +144,28 @@ async def _list_extract_rules(db: AsyncSession, request_id: int, dataset_id: int
     )
     all_rules = (await db.execute(stmt)).scalars().all()
     rule_list: list[ApiExtractRule] = []
+    for item in all_rules:
+        if item.dataset_id is None:
+            rule_list.append(item)
+        elif dataset_id is not None and item.dataset_id == dataset_id:
+            rule_list.append(item)
+    return rule_list
+
+
+async def _list_assert_rules(db: AsyncSession, request_id: int, dataset_id: int | None) -> list[ApiAssertRule]:
+    stmt = (
+        select(ApiAssertRule)
+        .where(
+            and_(
+                ApiAssertRule.request_id == request_id,
+                ApiAssertRule.is_deleted == 0,
+                ApiAssertRule.is_enabled.is_(True),
+            )
+        )
+        .order_by(ApiAssertRule.sort, ApiAssertRule.id)
+    )
+    all_rules = (await db.execute(stmt)).scalars().all()
+    rule_list: list[ApiAssertRule] = []
     for item in all_rules:
         if item.dataset_id is None:
             rule_list.append(item)
@@ -255,6 +306,20 @@ async def run_api_request(
     db.add(run_obj)
     await db.flush()
 
+    assert_records: list[dict] = []
+    assert_fail_reasons: list[str] = []
+    if run_obj.error_message is None:
+        assert_rule_list = await _list_assert_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
+        _, assert_records = evaluate_assert_rules(assert_rule_list, exec_result)
+        assert_fail_reasons = [item["detail"] for item in assert_records if not item["passed"] and item.get("detail")]
+        if assert_fail_reasons:
+            run_obj.is_success = False
+            assert_error_message = "; ".join(assert_fail_reasons)
+            if run_obj.error_message:
+                run_obj.error_message = f"{run_obj.error_message}; {assert_error_message}"
+            else:
+                run_obj.error_message = assert_error_message
+
     extracted_variables: dict = {}
     try:
         rule_list = await _list_extract_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
@@ -303,9 +368,23 @@ async def run_api_request(
             "response_status_code": run_obj.response_status_code,
             "response_time_ms": run_obj.response_time_ms,
             "error_message": run_obj.error_message,
+            "assertion_total": len(assert_records),
+            "assertion_passed": len([item for item in assert_records if item["passed"]]),
+            "assertion_failed": len(assert_fail_reasons),
+            "assertion_fail_reasons": assert_fail_reasons,
             "extracted_variables": extracted_variables,
         },
     )
+
+
+@router.get("/run/{run_id}", summary="运行结果详情")
+async def request_run_detail(
+    run_id: int,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_request_run_or_404(db, run_id)
+    return api_response(data=jsonable_encoder(obj.to_dict()))
 
 
 @router.post("/extract", summary="新增变量提取规则")
@@ -389,6 +468,92 @@ async def delete_extract_rule(
     db: AsyncSession = Depends(get_db_session),
 ):
     obj = await _get_extract_rule_or_404(db, request_data.id)
+    obj.is_deleted = admin.id
+    obj.touch()
+    await db.commit()
+    return api_response(code=204)
+
+
+@router.post("/assert", summary="新增断言规则")
+async def create_assert_rule(
+    request_data: ApiAssertRuleCreateReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    request_obj = await _get_api_request_or_404(db, request_data.request_id)
+    if request_data.dataset_id is not None:
+        dataset_obj = await _get_dataset_or_404(db, request_data.dataset_id)
+        if dataset_obj.request_id != request_obj.id:
+            raise CustomException(detail="数据集与测试用例不匹配", custom_code=10005)
+
+    save_data = request_data.model_dump(exclude_unset=True)
+    obj = ApiAssertRule(**save_data)
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return api_response(http_code=status.HTTP_201_CREATED, code=201, data={"id": obj.id})
+
+
+@router.put("/assert", summary="编辑断言规则")
+async def update_assert_rule(
+    request_data: ApiAssertRuleUpdateReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_assert_rule_or_404(db, request_data.id)
+    request_obj = await _get_api_request_or_404(db, obj.request_id)
+
+    update_data = request_data.model_dump(exclude_unset=True)
+    update_data.pop("id", None)
+    if "dataset_id" in update_data and update_data["dataset_id"] is not None:
+        dataset_obj = await _get_dataset_or_404(db, update_data["dataset_id"])
+        if dataset_obj.request_id != request_obj.id:
+            raise CustomException(detail="数据集与测试用例不匹配", custom_code=10005)
+
+    if update_data:
+        for k, v in update_data.items():
+            setattr(obj, k, v)
+        obj.touch()
+        await db.commit()
+    return api_response(http_code=status.HTTP_201_CREATED, code=201)
+
+
+@router.get("/assert/{rule_id}", summary="断言规则详情")
+async def assert_rule_detail(
+    rule_id: int,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_assert_rule_or_404(db, rule_id)
+    return api_response(data=jsonable_encoder(obj.to_dict()))
+
+
+@router.post("/assert/page", summary="断言规则分页")
+async def assert_rule_page(
+    request_data: ApiAssertRulePageReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    await _get_api_request_or_404(db, request_data.request_id)
+    pq = CommonPaginateQuery(
+        request_data=request_data,
+        orm_model=ApiAssertRule,
+        db_session=db,
+        where_list=["request_id", "dataset_id", "is_deleted", "assert_type"],
+        order_by_list=["sort", "id"],
+        skip_list=["is_deleted"],
+    )
+    await pq.build_query()
+    return api_response(data=pq.normal_data)
+
+
+@router.delete("/assert", summary="删除断言规则")
+async def delete_assert_rule(
+    request_data: ApiAssertRuleDeleteReqData,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    obj = await _get_assert_rule_or_404(db, request_data.id)
     obj.is_deleted = admin.id
     obj.touch()
     await db.commit()

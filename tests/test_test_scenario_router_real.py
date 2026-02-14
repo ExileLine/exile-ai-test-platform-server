@@ -482,6 +482,25 @@ async def test_real_scenario_run_with_extracted_variables(
         assert detail_body["data"]["run_status"] == "success"
         assert detail_body["data"]["total_request_runs"] == 2
 
+        report_resp = await client.get(f"/api/scenario/run/{scenario_run_id}/report", headers=auth_headers)
+        assert report_resp.status_code == 200
+        report_body = report_resp.json()
+        assert report_body["code"] == 200
+        summary = report_body["data"]["summary"]
+        assert summary["scenario_id"] == scenario_id
+        assert summary["run_status"] == "success"
+        assert summary["planned_step_total"] == 2
+        assert summary["executed_step_total"] == 2
+        assert summary["failed_step_total"] == 0
+        assert summary["total_request_runs"] == 2
+        assert summary["success_request_runs"] == 2
+        assert summary["failed_request_runs"] == 0
+        assert summary["success_rate"] == 1.0
+        assert len(report_body["data"]["failed_runs"]) == 0
+        step_reports = report_body["data"]["step_reports"]
+        assert len(step_reports) == 2
+        assert [item["step_no"] for item in step_reports] == [1, 2]
+
     async with AsyncSessionLocal() as session:
         scenario_run = (
             await session.execute(select(ScenarioRunModel).where(ScenarioRunModel.id == scenario_run_id))

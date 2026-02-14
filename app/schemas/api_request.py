@@ -20,6 +20,8 @@ EXTRACT_SOURCE_VALUES = {
     "session",
 }
 EXTRACT_SCOPE_VALUES = {"step", "scenario", "global"}
+ASSERT_TYPE_VALUES = {"status_code", "json_path", "text_contains"}
+ASSERT_COMPARATOR_VALUES = {"eq", "ne", "contains", "not_contains"}
 
 
 class ApiRequestCreateReqData(BaseModel):
@@ -291,3 +293,66 @@ class ApiExtractRulePageReqData(CommonPage):
             None,
         ]
     ] = None
+
+
+class ApiAssertRuleCreateReqData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    request_id: int = Field(description="测试用例ID")
+    dataset_id: Optional[int] = Field(default=None, description="数据集ID(为空表示通用)")
+    assert_type: Literal["status_code", "json_path", "text_contains"] = Field(description="断言类型")
+    source_expr: Optional[str] = Field(default=None, description="断言来源表达式")
+    comparator: Literal["eq", "ne", "contains", "not_contains"] = Field(default="eq", description="比较方式")
+    expected_value: Optional[Any] = Field(default=None, description="预期值")
+    message: Optional[str] = Field(default=None, description="自定义失败提示")
+    is_enabled: bool = Field(default=True, description="是否启用")
+    sort: int = Field(default=0, description="排序值")
+
+    @field_validator("source_expr")
+    @classmethod
+    def validate_source_expr(cls, value: Optional[str], info):  # noqa: ANN001
+        assert_type = info.data.get("assert_type")
+        if assert_type == "json_path" and (value is None or value.strip() == ""):
+            raise ValueError("assert_type=json_path 时 source_expr 必传")
+        return value
+
+    @field_validator("expected_value")
+    @classmethod
+    def validate_expected_value(cls, value: Optional[Any], info):  # noqa: ANN001
+        assert_type = info.data.get("assert_type")
+        if assert_type in {"status_code", "json_path", "text_contains"} and value is None:
+            raise ValueError(f"assert_type={assert_type} 时 expected_value 必传")
+        return value
+
+    @field_validator("comparator")
+    @classmethod
+    def validate_comparator(cls, value: str, info):  # noqa: ANN001
+        assert_type = info.data.get("assert_type")
+        if assert_type == "text_contains" and value not in {"contains", "not_contains"}:
+            raise ValueError("assert_type=text_contains 时 comparator 仅支持 contains/not_contains")
+        return value
+
+
+class ApiAssertRuleUpdateReqData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(description="断言规则ID")
+    dataset_id: Optional[int] = Field(default=None, description="数据集ID")
+    assert_type: Optional[Literal["status_code", "json_path", "text_contains"]] = Field(default=None, description="断言类型")
+    source_expr: Optional[str] = Field(default=None, description="断言来源表达式")
+    comparator: Optional[Literal["eq", "ne", "contains", "not_contains"]] = Field(default=None, description="比较方式")
+    expected_value: Optional[Any] = Field(default=None, description="预期值")
+    message: Optional[str] = Field(default=None, description="自定义失败提示")
+    is_enabled: Optional[bool] = Field(default=None, description="是否启用")
+    sort: Optional[int] = Field(default=None, description="排序值")
+
+
+class ApiAssertRuleDeleteReqData(BaseModel):
+    id: int = Field(description="断言规则ID")
+
+
+class ApiAssertRulePageReqData(CommonPage):
+    request_id: int
+    dataset_id: Optional[int] = None
+    is_deleted: int = 0
+    assert_type: Optional[Literal["status_code", "json_path", "text_contains", "", None]] = None

@@ -12,7 +12,7 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiExtractRule, ApiRequest, ApiRequestDataset, ApiRequestRun
+from app.models.api_request import ApiAssertRule, ApiExtractRule, ApiRequest, ApiRequestDataset, ApiRequestRun
 
 
 class _FakeScalarResult:
@@ -152,6 +152,48 @@ def _build_extract_rule(**kwargs) -> ApiExtractRule:
     return obj
 
 
+def _build_assert_rule(**kwargs) -> ApiAssertRule:
+    obj = ApiAssertRule(
+        request_id=kwargs.pop("request_id", 10),
+        dataset_id=kwargs.pop("dataset_id", None),
+        assert_type=kwargs.pop("assert_type", "status_code"),
+        source_expr=kwargs.pop("source_expr", None),
+        comparator=kwargs.pop("comparator", "eq"),
+        expected_value=kwargs.pop("expected_value", 200),
+        message=kwargs.pop("message", None),
+        is_enabled=kwargs.pop("is_enabled", True),
+        sort=kwargs.pop("sort", 0),
+        is_deleted=kwargs.pop("is_deleted", 0),
+    )
+    obj.id = kwargs.pop("id", 80)
+    for k, v in kwargs.items():
+        setattr(obj, k, v)
+    return obj
+
+
+def _build_request_run(**kwargs) -> ApiRequestRun:
+    obj = ApiRequestRun(
+        request_id=kwargs.pop("request_id", 10),
+        scenario_run_id=kwargs.pop("scenario_run_id", None),
+        scenario_id=kwargs.pop("scenario_id", None),
+        scenario_case_id=kwargs.pop("scenario_case_id", None),
+        dataset_id=kwargs.pop("dataset_id", None),
+        dataset_snapshot=kwargs.pop("dataset_snapshot", {}),
+        request_snapshot=kwargs.pop("request_snapshot", {}),
+        response_status_code=kwargs.pop("response_status_code", 200),
+        response_headers=kwargs.pop("response_headers", {}),
+        response_body=kwargs.pop("response_body", None),
+        response_time_ms=kwargs.pop("response_time_ms", 10),
+        is_success=kwargs.pop("is_success", True),
+        error_message=kwargs.pop("error_message", None),
+        is_deleted=kwargs.pop("is_deleted", 0),
+    )
+    obj.id = kwargs.pop("id", 95)
+    for k, v in kwargs.items():
+        setattr(obj, k, v)
+    return obj
+
+
 @pytest.fixture
 def fake_db():
     return FakeDBSession()
@@ -239,6 +281,24 @@ def test_api_request_detail_success(monkeypatch: pytest.MonkeyPatch, client: Tes
     assert body["code"] == 200
     assert body["data"]["id"] == 12
     assert body["data"]["name"] == "case-detail"
+
+
+def test_request_run_detail_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    run_obj = _build_request_run(id=96, request_id=12, response_status_code=201)
+
+    async def _fake_get_run(db, run_id: int):
+        assert run_id == 96
+        return run_obj
+
+    monkeypatch.setattr(api_request_router, "_get_request_run_or_404", _fake_get_run)
+
+    resp = client.get("/api/case/run/96")
+    body = resp.json()
+
+    assert resp.status_code == 200
+    assert body["code"] == 200
+    assert body["data"]["id"] == 96
+    assert body["data"]["response_status_code"] == 201
 
 
 def test_api_request_page_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):
@@ -442,6 +502,60 @@ def test_run_api_request_success(
     assert run_obj.is_success is True
 
 
+def test_run_api_request_assertion_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    fake_db: FakeDBSession,
+):
+    request_obj = _build_api_request(id=181, execute_count=0)
+    assert_rule = _build_assert_rule(id=801, request_id=181, assert_type="status_code", expected_value=201)
+
+    async def _fake_get_api_request(db, request_id: int):
+        assert request_id == 181
+        return request_obj
+
+    async def _fake_resolve_dataset(db, req_obj, dataset_id):
+        assert req_obj.id == 181
+        assert dataset_id is None
+        return None
+
+    async def _fake_execute_api_request(request_obj, dataset_obj, environment_obj):
+        return {
+            "dataset_snapshot": {},
+            "request_snapshot": {"request_id": 181, "method": "GET", "url": "https://example.com/api"},
+            "response_status_code": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"ok":true}',
+            "response_time_ms": 10,
+            "is_success": True,
+            "error_message": None,
+        }
+
+    async def _fake_list_assert_rules(db, request_id: int, dataset_id):
+        assert request_id == 181
+        assert dataset_id is None
+        return [assert_rule]
+
+    monkeypatch.setattr(api_request_router, "_get_api_request_or_404", _fake_get_api_request)
+    monkeypatch.setattr(api_request_router, "_resolve_dataset_for_run", _fake_resolve_dataset)
+    monkeypatch.setattr(api_request_router, "execute_api_request", _fake_execute_api_request)
+    monkeypatch.setattr(api_request_router, "_list_assert_rules", _fake_list_assert_rules)
+
+    resp = client.post("/api/case/run", json={"request_id": 181})
+    body = resp.json()
+
+    assert resp.status_code == 201
+    assert body["code"] == 201
+    assert body["data"]["is_success"] is False
+    assert body["data"]["assertion_total"] == 1
+    assert body["data"]["assertion_failed"] == 1
+    assert "断言失败" in body["data"]["error_message"]
+
+    run_obj = fake_db.added[0]
+    assert isinstance(run_obj, ApiRequestRun)
+    assert run_obj.is_success is False
+
+
 def test_run_api_request_dataset_mismatch_returns_10005(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -535,6 +649,49 @@ def test_create_extract_rule_success(
     assert obj.request_id == 30
     assert obj.dataset_id == 90
     assert obj.var_name == "token"
+
+
+def test_create_assert_rule_success(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    fake_db: FakeDBSession,
+):
+    request_obj = _build_api_request(id=301)
+    dataset_obj = _build_dataset(id=901, request_id=301)
+
+    async def _fake_get_api_request(db, request_id: int):
+        assert request_id == 301
+        return request_obj
+
+    async def _fake_get_dataset(db, dataset_id: int):
+        assert dataset_id == 901
+        return dataset_obj
+
+    monkeypatch.setattr(api_request_router, "_get_api_request_or_404", _fake_get_api_request)
+    monkeypatch.setattr(api_request_router, "_get_dataset_or_404", _fake_get_dataset)
+
+    resp = client.post(
+        "/api/case/assert",
+        json={
+            "request_id": 301,
+            "dataset_id": 901,
+            "assert_type": "json_path",
+            "source_expr": "$.data.ok",
+            "comparator": "eq",
+            "expected_value": True,
+            "message": "ok 字段必须为 true",
+        },
+    )
+    body = resp.json()
+
+    assert resp.status_code == 201
+    assert body["code"] == 201
+    assert len(fake_db.added) == 1
+    obj = fake_db.added[0]
+    assert isinstance(obj, ApiAssertRule)
+    assert obj.request_id == 301
+    assert obj.dataset_id == 901
+    assert obj.assert_type == "json_path"
 
 
 def test_update_extract_rule_success(monkeypatch: pytest.MonkeyPatch, client: TestClient):

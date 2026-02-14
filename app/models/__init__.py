@@ -1,5 +1,6 @@
 # 新增模型后，请在这里导入，供 Alembic 自动发现
 from app.models.api_request import (
+    ApiAssertRule,
     ApiExtractRule,
     ApiEnvironment,
     ApiRequest,
@@ -19,6 +20,7 @@ __all__ = [
     "ApiEnvironment",
     "ApiRequest",
     "ApiRequestDataset",
+    "ApiAssertRule",
     "ApiExtractRule",
     "TestScenario",
     "TestScenarioCase",

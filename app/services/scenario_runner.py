@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import CustomException
 from app.models.api_request import (
+    ApiAssertRule,
     ApiEnvironment,
     ApiExtractRule,
     ApiRequest,
@@ -21,6 +22,7 @@ from app.models.api_request import (
     TestScenarioCase,
     TestScenarioRun,
 )
+from app.services.assertion_evaluator import evaluate_assert_rules
 from app.services.api_request_executor import execute_api_request
 from app.services.variable_extractor import ExtractRequiredError, apply_extract_rules
 
@@ -111,6 +113,32 @@ async def _query_extract_rules(
     )
     all_rules = (await db.execute(stmt)).scalars().all()
     result: list[ApiExtractRule] = []
+    for rule in all_rules:
+        if rule.dataset_id is None:
+            result.append(rule)
+        elif dataset_id is not None and rule.dataset_id == dataset_id:
+            result.append(rule)
+    return result
+
+
+async def _query_assert_rules(
+    db: AsyncSession,
+    request_id: int,
+    dataset_id: int | None,
+) -> list[ApiAssertRule]:
+    stmt = (
+        select(ApiAssertRule)
+        .where(
+            and_(
+                ApiAssertRule.request_id == request_id,
+                ApiAssertRule.is_deleted == 0,
+                ApiAssertRule.is_enabled.is_(True),
+            )
+        )
+        .order_by(ApiAssertRule.sort, ApiAssertRule.id)
+    )
+    all_rules = (await db.execute(stmt)).scalars().all()
+    result: list[ApiAssertRule] = []
     for rule in all_rules:
         if rule.dataset_id is None:
             result.append(rule)
@@ -216,6 +244,18 @@ async def run_scenario_with_existing_run(
 
                 request_obj.execute_count = (request_obj.execute_count or 0) + 1
                 request_obj.touch()
+
+                if run_obj.error_message is None:
+                    assert_rules = await _query_assert_rules(db, request_obj.id, dataset_obj.id if dataset_obj else None)
+                    _, assert_records = evaluate_assert_rules(assert_rules, execute_result)
+                    assert_fail_reasons = [item["detail"] for item in assert_records if not item["passed"] and item.get("detail")]
+                    if assert_fail_reasons:
+                        run_obj.is_success = False
+                        assert_error_message = "; ".join(assert_fail_reasons)
+                        if run_obj.error_message:
+                            run_obj.error_message = f"{run_obj.error_message}; {assert_error_message}"
+                        else:
+                            run_obj.error_message = assert_error_message
 
                 extract_error = None
                 rule_records: list[dict[str, Any]] = []

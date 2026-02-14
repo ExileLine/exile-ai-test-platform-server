@@ -186,6 +186,26 @@ class ApiExtractRule(CustomBaseModel):
     sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序值")
 
 
+class ApiAssertRule(CustomBaseModel):
+    """断言规则(定义如何校验响应是否符合预期)"""
+
+    __tablename__ = "exile_api_assert_rules"
+
+    request_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="测试用例ID")
+    dataset_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="数据集ID(为空表示通用)")
+    assert_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="断言类型:status_code/json_path/text_contains",
+    )
+    source_expr: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="断言来源表达式")
+    comparator: Mapped[str] = mapped_column(String(16), nullable=False, default="eq", comment="比较方式:eq/ne/contains/not_contains")
+    expected_value: Mapped[Any | None] = mapped_column(JSON, nullable=True, comment="预期值")
+    message: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="自定义失败提示")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, comment="是否启用")
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序值")
+
+
 class TestScenarioRun(CustomBaseModel):
     """场景执行记录"""
 

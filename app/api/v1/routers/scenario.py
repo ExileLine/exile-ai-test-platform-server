@@ -3,6 +3,8 @@
 # @Author  : yangyuexiong
 # @File    : scenario.py
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import and_, select
@@ -14,7 +16,7 @@ from app.core.response import api_response
 from app.core.security import check_admin_existence
 from app.db.session import get_db_session
 from app.models.admin import Admin
-from app.models.api_request import ApiRequest, ApiRequestDataset, TestScenario, TestScenarioCase, TestScenarioRun
+from app.models.api_request import ApiRequest, ApiRequestDataset, ApiRequestRun, TestScenario, TestScenarioCase, TestScenarioRun
 from app.services.scenario_task_dispatcher import dispatch_scenario_run_task
 from app.services.scenario_runner import build_scenario_run_result
 from app.schemas.scenario import (
@@ -120,6 +122,182 @@ async def _reorder_scenario_step(
     return target_step_no
 
 
+async def _get_scenario_for_report(db: AsyncSession, scenario_id: int) -> TestScenario | None:
+    stmt = select(TestScenario).where(TestScenario.id == scenario_id)
+    return (await db.execute(stmt)).scalars().first()
+
+
+async def _list_scenario_steps_for_report(db: AsyncSession, scenario_id: int) -> list[TestScenarioCase]:
+    stmt = (
+        select(TestScenarioCase)
+        .where(
+            and_(
+                TestScenarioCase.scenario_id == scenario_id,
+                TestScenarioCase.is_deleted == 0,
+                TestScenarioCase.is_enabled.is_(True),
+            )
+        )
+        .order_by(TestScenarioCase.step_no, TestScenarioCase.id)
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
+async def _list_request_runs_for_report(db: AsyncSession, scenario_run_id: int) -> list[ApiRequestRun]:
+    stmt = (
+        select(ApiRequestRun)
+        .where(and_(ApiRequestRun.scenario_run_id == scenario_run_id, ApiRequestRun.is_deleted == 0))
+        .order_by(ApiRequestRun.id)
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
+def _build_scenario_run_report(
+    scenario_run: TestScenarioRun,
+    scenario_obj: TestScenario | None,
+    step_list: list[TestScenarioCase],
+    run_list: list[ApiRequestRun],
+) -> dict[str, Any]:
+    step_report_map: dict[int, dict[str, Any]] = {}
+    for step_obj in step_list:
+        step_report_map[step_obj.id] = {
+            "scenario_case_id": step_obj.id,
+            "step_no": step_obj.step_no,
+            "request_id": step_obj.request_id,
+            "dataset_run_mode": step_obj.dataset_run_mode,
+            "dataset_id": step_obj.dataset_id,
+            "run_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "is_success": False,
+            "total_response_time_ms": 0,
+            "avg_response_time_ms": None,
+            "max_response_time_ms": None,
+            "min_response_time_ms": None,
+            "last_run_id": None,
+            "last_status_code": None,
+            "last_error_message": None,
+            "_timed_count": 0,
+        }
+
+    failed_runs: list[dict[str, Any]] = []
+    total_response_time_ms = 0
+    total_timed_count = 0
+    max_response_time_ms = None
+    min_response_time_ms = None
+
+    for run_obj in run_list:
+        step_key = run_obj.scenario_case_id if run_obj.scenario_case_id is not None else -int(run_obj.id or 0)
+        if step_key not in step_report_map:
+            step_report_map[step_key] = {
+                "scenario_case_id": run_obj.scenario_case_id,
+                "step_no": None,
+                "request_id": run_obj.request_id,
+                "dataset_run_mode": None,
+                "dataset_id": run_obj.dataset_id,
+                "run_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "is_success": False,
+                "total_response_time_ms": 0,
+                "avg_response_time_ms": None,
+                "max_response_time_ms": None,
+                "min_response_time_ms": None,
+                "last_run_id": None,
+                "last_status_code": None,
+                "last_error_message": None,
+                "_timed_count": 0,
+            }
+
+        report_item = step_report_map[step_key]
+        report_item["run_count"] += 1
+        if run_obj.is_success:
+            report_item["success_count"] += 1
+        else:
+            report_item["failed_count"] += 1
+            failed_runs.append(
+                {
+                    "run_id": run_obj.id,
+                    "scenario_case_id": run_obj.scenario_case_id,
+                    "step_no": report_item["step_no"],
+                    "request_id": run_obj.request_id,
+                    "dataset_id": run_obj.dataset_id,
+                    "response_status_code": run_obj.response_status_code,
+                    "response_time_ms": run_obj.response_time_ms,
+                    "error_message": run_obj.error_message,
+                }
+            )
+
+        if run_obj.response_time_ms is not None:
+            report_item["total_response_time_ms"] += run_obj.response_time_ms
+            report_item["_timed_count"] += 1
+            if report_item["max_response_time_ms"] is None or run_obj.response_time_ms > report_item["max_response_time_ms"]:
+                report_item["max_response_time_ms"] = run_obj.response_time_ms
+            if report_item["min_response_time_ms"] is None or run_obj.response_time_ms < report_item["min_response_time_ms"]:
+                report_item["min_response_time_ms"] = run_obj.response_time_ms
+
+            total_response_time_ms += run_obj.response_time_ms
+            total_timed_count += 1
+            if max_response_time_ms is None or run_obj.response_time_ms > max_response_time_ms:
+                max_response_time_ms = run_obj.response_time_ms
+            if min_response_time_ms is None or run_obj.response_time_ms < min_response_time_ms:
+                min_response_time_ms = run_obj.response_time_ms
+
+        last_run_id = report_item["last_run_id"]
+        if last_run_id is None or (run_obj.id is not None and run_obj.id > last_run_id):
+            report_item["last_run_id"] = run_obj.id
+            report_item["last_status_code"] = run_obj.response_status_code
+            report_item["last_error_message"] = run_obj.error_message
+
+    step_reports = list(step_report_map.values())
+    for item in step_reports:
+        timed_count = item.pop("_timed_count")
+        item["is_success"] = item["run_count"] > 0 and item["failed_count"] == 0
+        if timed_count > 0:
+            item["avg_response_time_ms"] = round(item["total_response_time_ms"] / timed_count, 2)
+        else:
+            item["avg_response_time_ms"] = None
+            item["max_response_time_ms"] = None
+            item["min_response_time_ms"] = None
+
+    step_reports.sort(
+        key=lambda item: (
+            item["step_no"] if item["step_no"] is not None else 10 ** 9,
+            item["scenario_case_id"] if item["scenario_case_id"] is not None else 10 ** 9,
+        )
+    )
+
+    total_request_runs = len(run_list)
+    success_request_runs = len([item for item in run_list if item.is_success])
+    failed_request_runs = total_request_runs - success_request_runs
+    executed_step_total = len([item for item in step_reports if item["run_count"] > 0])
+    failed_step_total = len([item for item in step_reports if item["failed_count"] > 0])
+
+    summary = {
+        "scenario_id": scenario_run.scenario_id,
+        "scenario_name": scenario_obj.name if scenario_obj else None,
+        "run_status": scenario_run.run_status,
+        "is_success": scenario_run.is_success,
+        "planned_step_total": len(step_list),
+        "executed_step_total": executed_step_total,
+        "failed_step_total": failed_step_total,
+        "total_request_runs": total_request_runs,
+        "success_request_runs": success_request_runs,
+        "failed_request_runs": failed_request_runs,
+        "success_rate": round(success_request_runs / total_request_runs, 4) if total_request_runs > 0 else 0.0,
+        "total_response_time_ms": total_response_time_ms,
+        "avg_response_time_ms": round(total_response_time_ms / total_timed_count, 2) if total_timed_count > 0 else None,
+        "max_response_time_ms": max_response_time_ms,
+        "min_response_time_ms": min_response_time_ms,
+    }
+
+    return {
+        "scenario_run": build_scenario_run_result(scenario_run),
+        "summary": summary,
+        "step_reports": step_reports,
+        "failed_runs": failed_runs,
+    }
+
+
 @router.post("/run", summary="执行测试场景(异步入队)")
 async def run_scenario(
     request_data: TestScenarioRunReqData,
@@ -172,6 +350,22 @@ async def scenario_run_detail(
 ):
     scenario_run = await _get_scenario_run_or_404(db, scenario_run_id)
     return api_response(data=build_scenario_run_result(scenario_run))
+
+
+@router.get("/run/{scenario_run_id}/report", summary="测试场景执行报告")
+async def scenario_run_report(
+    scenario_run_id: int,
+    admin: Admin = Depends(check_admin_existence),
+    db: AsyncSession = Depends(get_db_session),
+):
+    scenario_run = await _get_scenario_run_or_404(db, scenario_run_id)
+    scenario_obj = await _get_scenario_for_report(db, scenario_run.scenario_id)
+    step_list: list[TestScenarioCase] = []
+    if scenario_obj:
+        step_list = await _list_scenario_steps_for_report(db, scenario_obj.id)
+    run_list = await _list_request_runs_for_report(db, scenario_run.id)
+    report_data = _build_scenario_run_report(scenario_run, scenario_obj, step_list, run_list)
+    return api_response(data=report_data)
 
 
 @router.post("/run/cancel", summary="取消测试场景运行")

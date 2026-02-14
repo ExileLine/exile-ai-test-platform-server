@@ -54,6 +54,27 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "exile_api_assert_rules",
+        sa.Column("request_id", sa.BigInteger(), nullable=False, comment="测试用例ID"),
+        sa.Column("dataset_id", sa.BigInteger(), nullable=True, comment="数据集ID(为空表示通用)"),
+        sa.Column("assert_type", sa.String(length=32), nullable=False, comment="断言类型:status_code/json_path/text_contains"),
+        sa.Column("source_expr", sa.String(length=255), nullable=True, comment="断言来源表达式"),
+        sa.Column("comparator", sa.String(length=16), nullable=False, comment="比较方式:eq/ne/contains/not_contains"),
+        sa.Column("expected_value", sa.JSON(), nullable=True, comment="预期值"),
+        sa.Column("message", sa.String(length=255), nullable=True, comment="自定义失败提示"),
+        sa.Column("is_enabled", sa.Boolean(), nullable=False, comment="是否启用"),
+        sa.Column("sort", sa.Integer(), nullable=False, comment="排序值"),
+        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False, comment="id"),
+        sa.Column("create_time", sa.DateTime(timezone=True), nullable=False, comment="创建时间(结构化时间)"),
+        sa.Column("create_timestamp", sa.BigInteger(), nullable=False, comment="创建时间(时间戳)"),
+        sa.Column("update_time", sa.DateTime(timezone=True), nullable=False, comment="更新时间(结构化时间)"),
+        sa.Column("update_timestamp", sa.BigInteger(), nullable=True, comment="更新时间(时间戳)"),
+        sa.Column("is_deleted", sa.BigInteger(), nullable=True, comment="0正常;其他:已删除"),
+        sa.Column("status", sa.Integer(), nullable=True, comment="状态"),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    op.create_table(
         "exile_test_scenario_runs",
         sa.Column("scenario_id", sa.BigInteger(), nullable=False, comment="场景ID"),
         sa.Column("env_id", sa.BigInteger(), nullable=True, comment="执行环境ID"),
@@ -104,5 +125,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("exile_api_run_variables")
     op.drop_table("exile_test_scenario_runs")
+    op.drop_table("exile_api_assert_rules")
     op.drop_table("exile_api_extract_rules")
     op.drop_column("exile_api_request_runs", "scenario_run_id")
